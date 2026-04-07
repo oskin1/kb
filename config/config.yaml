@@ -1,0 +1,45 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# KB-RAG System Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+
+qdrant:
+  host: localhost
+  port: 6333
+  grpc_port: 6334
+
+embedding:
+  model: bge-m3          # ollama model name (multilingual EN+RU+ZH+…)
+  dimensions: 1024
+  distance: Cosine
+
+collections:
+  research_docs: research_docs
+  data_tables: data_tables
+  insights: insights
+
+collections_extra:
+  entities: entities     # named entities extracted from docs
+  facts: facts           # typed relationships between entities
+
+chunking:
+  chunk_size: 512
+  chunk_overlap: 64
+
+workspace:
+  raw_dir: raw
+
+llm:
+  provider: openai                 # openai or anthropic
+  model: gpt-4o-mini              # used for entity/fact extraction
+  temperature: 0.0
+  max_tokens: 2000
+
+temporal:
+  null_valid_at_treatment: always_valid
+  auto_invalidate_on_supersedes: true
+
+reranker:
+  enabled: true
+  model: BAAI/bge-reranker-v2-m3  # cross-encoder, multilingual
+  candidate_multiplier: 3
+  max_chunk_chars: 512

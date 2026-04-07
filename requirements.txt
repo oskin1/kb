@@ -1,0 +1,27 @@
+# KB-RAG dependencies
+
+# Vector database
+qdrant-client>=1.17
+
+# Embeddings (local via Ollama)
+ollama>=0.4
+
+# Chunking
+llama-index-core>=0.14
+llama-index-vector-stores-qdrant>=0.10
+
+# Document parsing
+PyMuPDF>=1.24          # PDF extraction (imported as fitz)
+beautifulsoup4>=4.12   # HTML parsing
+
+# Re-ranking (cross-encoder)
+sentence-transformers>=3.0
+
+# LLM providers (install the one you use)
+openai>=1.0
+# anthropic>=0.40      # uncomment if using Anthropic
+
+# Utilities
+pyyaml>=6.0
+requests>=2.31
+python-dotenv>=1.0

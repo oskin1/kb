@@ -1,0 +1,135 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Domain Configuration — customize this file for your knowledge base
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# This file defines the domain-specific "intelligence" of your KB:
+#   - What domains exist and how to auto-detect them from queries
+#   - What entity types to extract
+#   - What relationship types (ontology) to use for fact extraction
+#   - LLM system prompts tuned to your field
+#
+# After editing, no code changes are needed — all scripts read this file.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Domains ──────────────────────────────────────────────────────────────────
+# Each domain has:
+#   keywords:  list of terms for auto-routing queries to this domain
+#   relations: typed relationships the LLM should extract between entities
+#
+# The special "cross" domain is the fallback when no domain is detected.
+# RELATED_TO is always available as a catch-all.
+
+domains:
+  # Example: a medical research KB might have:
+  #
+  # clinical:
+  #   keywords: [patient, diagnosis, treatment, symptom, drug, dosage, trial]
+  #   relations:
+  #     - TREATS             # drug A treats condition B
+  #     - CAUSES             # condition A causes symptom B
+  #     - CONTRAINDICATES    # drug A contraindicates with drug B
+  #     - DIAGNOSED_BY       # condition A diagnosed by test B
+  #     - ADMINISTERED_VIA   # drug A administered via route B
+  #
+  # genomics:
+  #   keywords: [gene, protein, mutation, expression, pathway, allele]
+  #   relations:
+  #     - ENCODES            # gene A encodes protein B
+  #     - REGULATES          # protein A regulates gene/protein B
+  #     - MUTATED_IN         # gene A mutated in condition B
+
+  general:
+    keywords: []
+    relations:
+      - RELATED_TO           # fallback for unclassified relationships
+      - CONTAINS
+      - PART_OF
+      - PRODUCED_BY
+      - USED_IN
+      - HAS_PROPERTY
+      - AFFECTS
+      - REQUIRES
+      - IMPROVES
+      - DEVELOPED_BY
+
+# ── Entity Types ─────────────────────────────────────────────────────────────
+# What kinds of named entities the LLM should extract from your documents.
+# Add or remove types to match your domain.
+
+entity_types:
+  - concept
+  - organization
+  - person
+  - process
+  - property
+  - material
+  - equipment
+  - standard
+  - location
+  - event
+
+# ── LLM System Prompts ──────────────────────────────────────────────────────
+# These prompts tell the extraction LLM what kind of KB it's working with.
+# Customize to get better extraction quality for your domain.
+
+prompts:
+  # Used in entity_extract.py — tells the LLM what to extract
+  entity_extraction_system: >
+    You are a precise entity extractor for a research knowledge base.
+    Always respond with valid JSON only, no markdown fences, no explanation.
+
+  # Used in entity_extract.py — the per-chunk extraction instruction
+  # Available placeholders: {previous_chunks}, {current_chunk}
+  entity_extraction_user: |
+    <PREVIOUS_CHUNKS>
+    {previous_chunks}
+    </PREVIOUS_CHUNKS>
+    <CURRENT_CHUNK>
+    {current_chunk}
+    </CURRENT_CHUNK>
+
+    Extract named entities from the CURRENT_CHUNK that are explicitly or implicitly mentioned.
+
+    Guidelines:
+    1. Extract significant entities only — specific named things, not generic terms.
+    2. DO NOT create entries for relationships, actions, or verbs.
+    3. DO NOT create entries for pure temporal values (dates, years, durations).
+    4. Use full unambiguous names.
+    5. For each entity provide:
+       - name: canonical full name
+       - type: one of {entity_types}
+       - summary: one concise sentence describing what it is in this context
+
+    Respond with a JSON array. If no significant entities found, return [].
+    Example:
+    [
+      {{"name": "Example Entity", "type": "concept", "summary": "Brief description of the entity in context."}}
+    ]
+
+  # Used in entity_extract.py — deduplication / resolution prompt
+  entity_resolution_system: >
+    You are a precise entity extractor for a research knowledge base.
+    Always respond with valid JSON only, no markdown fences, no explanation.
+
+  # Used in entity_extract.py — the resolution instruction
+  # Available placeholders: {existing_entities}, {new_entity}
+  entity_resolution_user: |
+    <EXISTING_ENTITIES>
+    {existing_entities}
+    </EXISTING_ENTITIES>
+    <NEW_ENTITY>
+    {new_entity}
+    </NEW_ENTITY>
+
+    Determine if NEW_ENTITY is a duplicate of any entity in EXISTING_ENTITIES.
+
+    Guidelines:
+    1. Aliases, abbreviations, and alternate spellings of the same concept ARE duplicates.
+    2. Names in DIFFERENT LANGUAGES referring to the same concept ARE duplicates.
+       Always prefer the English canonical name if one exists.
+    3. Related but distinct things are NOT duplicates.
+    4. Use both name and summary to make the determination.
+    5. If duplicate: return the entity_id of the best match and a canonical name.
+
+    Respond with JSON only:
+    {{"is_duplicate": true/false, "existing_entity_id": "<uuid or null>", "canonical_name": "<best name>"}}
