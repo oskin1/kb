@@ -3,18 +3,8 @@
 arxiv_search.py — Search arXiv for papers and optionally ingest them into the KB.
 
 Usage:
-    python scripts/arxiv_search.py "search query" --max 10
-    python scripts/arxiv_search.py "topic" --domain mydomain --ingest
-    python scripts/arxiv_search.py "topic" --max 5 --ingest --project myproject
-
-Options:
-    query       (positional) — search string
-    --max       max results (default: 10)
-    --domain    metadata domain passed to ingest (default: cross)
-    --project   metadata project passed to ingest (default: general)
-    --ingest    after showing results, prompt for which to fetch+ingest
-    --collection  target collection (default: research_docs)
-    --sort      relevance (default) or date
+    python scripts/arxiv_search.py "search query" --kb-root /path/to/kb --max 10
+    python scripts/arxiv_search.py "topic" --kb-root ~/kb --domain mydomain --ingest
 """
 
 import argparse
@@ -25,6 +15,8 @@ from pathlib import Path
 from urllib.parse import urlencode
 from urllib.request import urlopen
 from urllib.error import URLError
+
+from kb_root import add_kb_root_arg, resolve_kb_root
 
 SCRIPTS_DIR = Path(__file__).parent
 ARXIV_API = "http://export.arxiv.org/api/query"
@@ -61,15 +53,11 @@ def search_arxiv(query: str, max_results: int = 10, sort_by: str = "relevance") 
     papers = []
 
     for entry in root.findall(f"{{{ATOM_NS}}}entry"):
-        # Extract arXiv ID from <id> tag (URL form: http://arxiv.org/abs/XXXX.XXXXX)
         id_elem = entry.find(f"{{{ATOM_NS}}}id")
         raw_id = id_elem.text.strip() if id_elem is not None else ""
-        # Extract just the ID part (last path segment, strip version)
         arxiv_id = raw_id.split("/")[-1]
         if "v" in arxiv_id and arxiv_id[-1].isdigit():
-            # Strip version suffix like v1, v2
             base = arxiv_id.rsplit("v", 1)[0]
-            # Only strip if the part after v is purely digits
             if arxiv_id.rsplit("v", 1)[-1].isdigit():
                 arxiv_id = base
 
@@ -102,7 +90,6 @@ def search_arxiv(query: str, max_results: int = 10, sort_by: str = "relevance") 
 
 
 def print_results(papers: list[dict]) -> None:
-    """Print ranked list of papers."""
     if not papers:
         print("No results found.")
         return
@@ -129,6 +116,7 @@ def ingest_papers(
     collection: str,
     domain: str,
     project: str,
+    kb_root_str: str,
 ) -> None:
     """Fetch and ingest selected papers via fetch_url.py."""
     fetch_script = SCRIPTS_DIR / "fetch_url.py"
@@ -139,7 +127,6 @@ def ingest_papers(
             continue
 
         p = papers[idx]
-        # Try HTML URL first (richer text), fall back to abs page
         url = p["url_html"]
         print(f"\n→ Ingesting [{idx}]: {p['title']}")
         print(f"  URL: {url}")
@@ -148,6 +135,7 @@ def ingest_papers(
             sys.executable,
             str(fetch_script),
             url,
+            "--kb-root", kb_root_str,
             "--collection", collection,
             "--ingest",
             "--meta",
@@ -170,7 +158,6 @@ def ingest_papers(
 
 
 def parse_indices(response: str, total: int) -> list[int]:
-    """Parse user input like '0,2,4' or 'all' into a list of indices."""
     response = response.strip().lower()
     if response == "all":
         return list(range(total))
@@ -190,6 +177,7 @@ def parse_indices(response: str, total: int) -> list[int]:
 def main():
     parser = argparse.ArgumentParser(description="Search arXiv and optionally ingest papers")
     parser.add_argument("query", help="Search query string")
+    add_kb_root_arg(parser)
     parser.add_argument("--max", type=int, default=10, metavar="N",
                         help="Max number of results (default: 10)")
     parser.add_argument("--domain", default="cross",
@@ -204,6 +192,8 @@ def main():
                         help="Sort order: relevance (default) or date")
     args = parser.parse_args()
 
+    kb_root = resolve_kb_root(args)
+
     print(f"🔍 Searching arXiv for: \"{args.query}\" (max={args.max}, sort={args.sort})")
     papers = search_arxiv(args.query, max_results=args.max, sort_by=args.sort)
     print(f"   Found {len(papers)} results\n")
@@ -215,7 +205,7 @@ def main():
         response = input("Ingest which? (comma-separated indices, or 'all', or Enter to skip): ")
         indices = parse_indices(response, len(papers))
         if indices:
-            ingest_papers(papers, indices, args.collection, args.domain, args.project)
+            ingest_papers(papers, indices, args.collection, args.domain, args.project, str(kb_root))
         else:
             print("Skipped.")
 

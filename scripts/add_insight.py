@@ -3,36 +3,24 @@
 add_insight.py — Store an agent-generated insight into the insights collection.
 
 Usage:
-    python add_insight.py "Your insight text here" \
-        --type conclusion \
-        --domain mydomain \
-        --subdomain subtopic \
-        --confidence established \
-        --tags tag1,tag2 \
-        --project myproject \
-        --source "session 2026-03-15" \
-        --source-docs <doc_id1> <doc_id2>
+    python add_insight.py "Your insight text here" --kb-root /path/to/kb \
+        --type conclusion --domain mydomain --confidence established
 """
 
 import argparse
 import uuid
-import yaml
 from datetime import date
-from pathlib import Path
 
 import ollama as ollama_client
 from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct
 
-CONFIG_PATH = Path(__file__).parent.parent / "config" / "config.yaml"
-
-def load_config():
-    with open(CONFIG_PATH) as f:
-        return yaml.safe_load(f)
+from kb_root import add_kb_root_arg, resolve_kb_root, load_config
 
 def main():
     parser = argparse.ArgumentParser(description="Add an insight to the KB")
     parser.add_argument("text", help="The insight text")
+    add_kb_root_arg(parser)
     parser.add_argument("--type", dest="insight_type", default="conclusion",
                         choices=["summary", "conclusion", "hypothesis", "gap", "connection"],
                         help="Insight type")
@@ -47,7 +35,8 @@ def main():
     parser.add_argument("--lang", default="en")
     args = parser.parse_args()
 
-    cfg = load_config()
+    kb_root = resolve_kb_root(args)
+    cfg = load_config(kb_root)
     client = QdrantClient(host=cfg["qdrant"]["host"], port=cfg["qdrant"]["port"])
     embed_model = cfg["embedding"]["model"]
 

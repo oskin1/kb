@@ -2,44 +2,11 @@
 """
 write_note.py — Write a structured research note as markdown AND ingest into Qdrant.
 
-This is the primary tool for persisting session output: analysis, proposals,
-conclusions, hypotheses. Produces a human-readable .md file in kb/notes/ AND
-stores each section as a searchable insight in the `insights` collection.
-
 Usage:
-    python scripts/write_note.py <note_file.md> [options]
-    python scripts/write_note.py --stdin [options]   # pipe markdown from stdin
+    python scripts/write_note.py <note_file.md> --kb-root /path/to/kb [options]
+    python scripts/write_note.py --stdin --kb-root ~/kb [options]
 
 The note file is plain markdown. Metadata is set via CLI or a YAML front matter block.
-
-Front matter example (optional, overrides CLI args):
-    ---
-    title: "HoneyComb paper — implications for our KB"
-    domain: cross
-    project: kb-infra
-    tags: [LLM, agent, materials-science, KB-design]
-    confidence: probable
-    source: "session 2026-03-16"
-    ---
-
-    # HoneyComb paper — implications for our KB
-    ...
-
-Options:
-    --title         Note title (required if no front matter)
-    --domain        Domain tag (default: cross)
-    --subdomain     Subdomain (optional)
-    --project       Project name (default: general)
-    --tags          Comma-separated tags
-    --confidence    established|probable|speculative|needs-verification (default: probable)
-    --source        Source reference (default: session YYYY-MM-DD)
-    --type          summary|conclusion|hypothesis|proposal|note (default: note)
-    --no-ingest     Save markdown only, skip Qdrant ingest
-    --output        Output path override (default: kb/notes/YYYY-MM-DD_<slug>.md)
-
-Examples:
-    python scripts/write_note.py /tmp/session_note.md --title "HoneyComb insights" --domain cross --project kb-infra --tags LLM,KB --ingest
-    python scripts/write_note.py --stdin --title "Quick note" < note.md
 """
 
 import argparse
@@ -56,13 +23,7 @@ from qdrant_client.models import PointStruct
 from llama_index.core import Document
 from llama_index.core.node_parser import SentenceSplitter
 
-CONFIG_PATH = Path(__file__).parent.parent / "config" / "config.yaml"
-NOTES_DIR = Path(__file__).parent.parent / "notes"
-
-
-def load_config():
-    with open(CONFIG_PATH) as f:
-        return yaml.safe_load(f)
+from kb_root import add_kb_root_arg, resolve_kb_root, load_config, notes_dir
 
 
 def slugify(text: str) -> str:
@@ -86,12 +47,13 @@ def parse_front_matter(content: str) -> tuple[dict, str]:
     return {}, content
 
 
-def build_output_path(title: str, today: str) -> Path:
-    NOTES_DIR.mkdir(parents=True, exist_ok=True)
+def build_output_path(kb_root: Path, title: str, today: str) -> Path:
+    nd = notes_dir(kb_root)
+    nd.mkdir(parents=True, exist_ok=True)
     slug = slugify(title)
-    candidate = NOTES_DIR / f"{today}_{slug}.md"
+    candidate = nd / f"{today}_{slug}.md"
     if candidate.exists():
-        candidate = NOTES_DIR / f"{today}_{slug}_{uuid.uuid4().hex[:4]}.md"
+        candidate = nd / f"{today}_{slug}_{uuid.uuid4().hex[:4]}.md"
     return candidate
 
 
@@ -153,6 +115,7 @@ def ingest_note(body: str, meta: dict, output_path: Path, cfg: dict) -> int:
 def main():
     parser = argparse.ArgumentParser(description="Write a research note + ingest into KB")
     parser.add_argument("file", nargs="?", help="Markdown file to write/ingest")
+    add_kb_root_arg(parser)
     parser.add_argument("--stdin", action="store_true", help="Read content from stdin")
     parser.add_argument("--title", help="Note title")
     parser.add_argument("--domain", default=None)
@@ -167,6 +130,8 @@ def main():
     parser.add_argument("--no-ingest", action="store_true", help="Skip Qdrant ingest")
     parser.add_argument("--output", help="Override output path")
     args = parser.parse_args()
+
+    kb_root = resolve_kb_root(args)
 
     # Read content
     if args.stdin:
@@ -204,18 +169,19 @@ def main():
         meta["tags"] = []
 
     # Determine output path
+    nd = notes_dir(kb_root)
     if args.output:
         output_path = Path(args.output)
         output_path.parent.mkdir(parents=True, exist_ok=True)
     elif args.file and not args.stdin:
         # If source file is already in notes/, use it in place; otherwise copy to notes/
         src = Path(args.file).resolve()
-        if str(src).startswith(str(NOTES_DIR.resolve())):
+        if str(src).startswith(str(nd.resolve())):
             output_path = src
         else:
-            output_path = build_output_path(meta["title"], today)
+            output_path = build_output_path(kb_root, meta["title"], today)
     else:
-        output_path = build_output_path(meta["title"], today)
+        output_path = build_output_path(kb_root, meta["title"], today)
 
     # Build final markdown with front matter header
     fm_block = yaml.dump(
@@ -230,7 +196,7 @@ def main():
 
     # Ingest into Qdrant
     if not args.no_ingest:
-        cfg = load_config()
+        cfg = load_config(kb_root)
         chunks = ingest_note(body, meta, output_path, cfg)
         print(f"✓ Ingested {chunks} chunks into [insights]")
         print(f"  Title:   {meta['title']}")

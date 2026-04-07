@@ -1,19 +1,12 @@
 #!/usr/bin/env python3
 """
-write_project.py — Create or update a project file in kb/projects/ and ingest into Qdrant.
-
-A project is a named research thread with a summary, goals, and a running log.
-Saved as kb/projects/<name>.md. If the file already exists, the log is appended
-and front matter updated; body sections are preserved.
+write_project.py — Create or update a project file and ingest into Qdrant.
 
 Usage:
-    python scripts/write_project.py --name kb-infra --summary "KB pipeline for R&D"
-    python scripts/write_project.py /tmp/project.md          # full file
-    python scripts/write_project.py --name kb-infra --log "Added write_note.py"
-    python scripts/write_project.py --list                   # list all projects
-
-Front matter fields: name, status, domain, started, updated
-Status values: active | paused | complete | archived
+    python scripts/write_project.py --name kb-infra --summary "KB pipeline" --kb-root ~/kb
+    python scripts/write_project.py /tmp/project.md --kb-root ~/kb
+    python scripts/write_project.py --name kb-infra --log "Added write_note.py" --kb-root ~/kb
+    python scripts/write_project.py --list --kb-root ~/kb
 """
 
 import argparse
@@ -29,13 +22,7 @@ from qdrant_client.models import PointStruct, Filter, FieldCondition, MatchValue
 from llama_index.core import Document
 from llama_index.core.node_parser import SentenceSplitter
 
-CONFIG_PATH = Path(__file__).parent.parent / "config" / "config.yaml"
-PROJECTS_DIR = Path(__file__).parent.parent / "projects"
-
-
-def load_config():
-    with open(CONFIG_PATH) as f:
-        return yaml.safe_load(f)
+from kb_root import add_kb_root_arg, resolve_kb_root, load_config, projects_dir
 
 
 def parse_front_matter(content: str) -> tuple[dict, str]:
@@ -58,9 +45,10 @@ def slugify(name: str) -> str:
     return name[:60].strip("-")
 
 
-def list_projects():
-    PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
-    files = [f for f in sorted(PROJECTS_DIR.glob("*.md")) if f.name != "TEMPLATE.md"]
+def list_projects(kb_root: Path):
+    pd = projects_dir(kb_root)
+    pd.mkdir(parents=True, exist_ok=True)
+    files = [f for f in sorted(pd.glob("*.md")) if f.name != "TEMPLATE.md"]
     if not files:
         print("No projects yet.")
         return
@@ -165,8 +153,9 @@ def append_log(content: str, entry: str, today: str) -> str:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Create or update a project in kb/projects/")
+    parser = argparse.ArgumentParser(description="Create or update a project")
     parser.add_argument("file", nargs="?", help="Full project markdown file")
+    add_kb_root_arg(parser)
     parser.add_argument("--name", help="Project name (used as filename slug)")
     parser.add_argument("--summary", help="One-paragraph summary (for new projects)")
     parser.add_argument("--domain", default="cross")
@@ -177,17 +166,20 @@ def main():
     parser.add_argument("--list", action="store_true", help="List all projects")
     args = parser.parse_args()
 
+    kb_root = resolve_kb_root(args)
+
     if args.list:
-        list_projects(); return
+        list_projects(kb_root); return
 
     today = date.today().isoformat()
-    PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+    pd = projects_dir(kb_root)
+    pd.mkdir(parents=True, exist_ok=True)
 
     if args.file:
         content = Path(args.file).read_text(encoding="utf-8")
         fm, body = parse_front_matter(content)
         name = args.name or fm.get("name") or Path(args.file).stem
-        output_path = PROJECTS_DIR / f"{slugify(name)}.md"
+        output_path = pd / f"{slugify(name)}.md"
         fm["updated"] = today
         fm.setdefault("started", today)
         fm.setdefault("status", args.status)
@@ -197,7 +189,7 @@ def main():
         output_path.write_text(final, encoding="utf-8")
 
     elif args.name:
-        output_path = PROJECTS_DIR / f"{slugify(args.name)}.md"
+        output_path = pd / f"{slugify(args.name)}.md"
 
         if output_path.exists():
             content = output_path.read_text(encoding="utf-8")
@@ -223,7 +215,7 @@ def main():
 
     if not args.no_ingest:
         _, body = parse_front_matter(output_path.read_text(encoding="utf-8"))
-        cfg = load_config()
+        cfg = load_config(kb_root)
         chunks = ingest_project(body, fm, output_path, cfg)
         print(f"✓ Ingested {chunks} chunks into [insights]")
         print(f"  Name:   {fm.get('name', output_path.stem)}")

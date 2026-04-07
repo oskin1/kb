@@ -7,10 +7,9 @@ contradictions. When a contradiction is found and the newer fact temporally supe
 the older one, the old fact is marked invalid (invalid_at set, superseded_by set).
 
 Usage:
-    python scripts/invalidate.py --audit              # full scan of all facts
-    python scripts/invalidate.py --doc-id <id>        # only facts from a specific doc
-    python scripts/invalidate.py --dry-run            # show what would change, don't write
-    python scripts/invalidate.py --audit --dry-run    # safe preview of full audit
+    python scripts/invalidate.py --audit --kb-root /path/to/kb
+    python scripts/invalidate.py --doc-id <id> --kb-root ~/kb
+    python scripts/invalidate.py --audit --kb-root ~/kb --dry-run
 
 Called automatically by fact_extract.py after storing each new fact (lightweight mode:
 only checks the new fact against existing facts for the same subject+object pair).
@@ -25,31 +24,15 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
 
-import yaml
 from qdrant_client import QdrantClient
 from qdrant_client.models import Filter, FieldCondition, MatchValue
 
-CONFIG_PATH = Path(__file__).parent.parent / "config" / "config.yaml"
-KB_DIR = Path(__file__).parent.parent
-
-
-def load_env():
-    env_file = KB_DIR / ".env"
-    if env_file.exists():
-        from dotenv import load_dotenv
-        load_dotenv(env_file)
-
-
-def load_config():
-    load_env()
-    with open(CONFIG_PATH) as f:
-        return yaml.safe_load(f)
+from kb_root import add_kb_root_arg, resolve_kb_root, load_config
 
 
 # ─── LLM client ───────────────────────────────────────────────────────────────
 
 def get_llm_client(cfg: dict):
-    sys.path.insert(0, str(Path(__file__).parent))
     from entity_extract import LLMClient
     return LLMClient(cfg)
 
@@ -237,7 +220,6 @@ def run_invalidation(cfg: dict, qdrant: QdrantClient, llm,
             pair_map[key].append(f)
 
     invalidations = 0
-    already_invalid = 0
 
     for (subj_id, obj_id), facts in pair_map.items():
         # Only check pairs with >1 fact
@@ -323,6 +305,7 @@ def run_targeted(cfg: dict, qdrant: QdrantClient, llm,
 
 def main():
     parser = argparse.ArgumentParser(description="Phase 5 — Edge invalidation for facts collection.")
+    add_kb_root_arg(parser)
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--audit", action="store_true",
                       help="Scan entire facts collection for contradictions")
@@ -334,7 +317,8 @@ def main():
                         help="Show per-pair progress")
     args = parser.parse_args()
 
-    cfg = load_config()
+    kb_root = resolve_kb_root(args)
+    cfg = load_config(kb_root)
     qdrant = get_qdrant(cfg)
     llm = get_llm_client(cfg)
 

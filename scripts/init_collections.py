@@ -3,6 +3,9 @@
 init_collections.py — Create Qdrant collections with correct schema.
 Run once on fresh setup, safe to re-run (skips existing collections).
 
+Usage:
+    python scripts/init_collections.py --kb-root /path/to/kb
+
 Collections:
   research_docs  — papers, web, textbooks
   data_tables    — structured/numerical data
@@ -10,17 +13,11 @@ Collections:
   entities       — named entities extracted from docs (Phase 2)
 """
 
-import sys
-import yaml
-from pathlib import Path
+import argparse
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PayloadSchemaType, TextIndexParams, TokenizerType
 
-CONFIG_PATH = Path(__file__).parent.parent / "config" / "config.yaml"
-
-def load_config():
-    with open(CONFIG_PATH) as f:
-        return yaml.safe_load(f)
+from kb_root import add_kb_root_arg, resolve_kb_root, load_config
 
 # Fields and their index types per collection type
 STANDARD_FIELDS = {
@@ -113,6 +110,10 @@ def init_collections(cfg):
         print(f"  {c.name}: {info.points_count} points")
 
 if __name__ == "__main__":
-    cfg = load_config()
+    parser = argparse.ArgumentParser(description="Create Qdrant collections with correct schema")
+    add_kb_root_arg(parser)
+    args = parser.parse_args()
+    kb_root = resolve_kb_root(args)
+    cfg = load_config(kb_root)
     print(f"Connecting to Qdrant at {cfg['qdrant']['host']}:{cfg['qdrant']['port']}...")
     init_collections(cfg)

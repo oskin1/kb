@@ -1,18 +1,10 @@
 #!/usr/bin/env python3
 """
-write_proposal.py — Write a structured proposal to kb/proposals/ and ingest into Qdrant insights.
-
-A proposal is an actionable recommendation with context, rationale, and checkboxed actions.
-Saved as kb/proposals/YYYY-MM-DD_<slug>.md and indexed in the `insights` collection.
+write_proposal.py — Write a structured proposal and ingest into Qdrant insights.
 
 Usage:
-    python scripts/write_proposal.py /tmp/proposal.md
-    python scripts/write_proposal.py --stdin --title "Add formulas collection"
-
-Front matter fields (in file or via CLI):
-    title, project, domain, subdomain, tags, confidence, status, source
-
-Status values: open | accepted | in-progress | done | rejected
+    python scripts/write_proposal.py /tmp/proposal.md --kb-root /path/to/kb
+    python scripts/write_proposal.py --stdin --kb-root ~/kb --title "Add formulas collection"
 """
 
 import argparse
@@ -29,13 +21,7 @@ from qdrant_client.models import PointStruct
 from llama_index.core import Document
 from llama_index.core.node_parser import SentenceSplitter
 
-CONFIG_PATH = Path(__file__).parent.parent / "config" / "config.yaml"
-PROPOSALS_DIR = Path(__file__).parent.parent / "proposals"
-
-
-def load_config():
-    with open(CONFIG_PATH) as f:
-        return yaml.safe_load(f)
+from kb_root import add_kb_root_arg, resolve_kb_root, load_config, proposals_dir
 
 
 def slugify(text: str) -> str:
@@ -57,12 +43,13 @@ def parse_front_matter(content: str) -> tuple[dict, str]:
     return {}, content
 
 
-def build_output_path(title: str, today: str) -> Path:
-    PROPOSALS_DIR.mkdir(parents=True, exist_ok=True)
+def build_output_path(kb_root: Path, title: str, today: str) -> Path:
+    pd = proposals_dir(kb_root)
+    pd.mkdir(parents=True, exist_ok=True)
     slug = slugify(title)
-    candidate = PROPOSALS_DIR / f"{today}_{slug}.md"
+    candidate = pd / f"{today}_{slug}.md"
     if candidate.exists():
-        candidate = PROPOSALS_DIR / f"{today}_{slug}_{uuid.uuid4().hex[:4]}.md"
+        candidate = pd / f"{today}_{slug}_{uuid.uuid4().hex[:4]}.md"
     return candidate
 
 
@@ -114,8 +101,9 @@ def ingest_proposal(body: str, meta: dict, output_path: Path, cfg: dict) -> int:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Write a proposal to kb/proposals/ and ingest")
+    parser = argparse.ArgumentParser(description="Write a proposal and ingest into KB")
     parser.add_argument("file", nargs="?", help="Markdown file")
+    add_kb_root_arg(parser)
     parser.add_argument("--stdin", action="store_true")
     parser.add_argument("--title", help="Proposal title")
     parser.add_argument("--project", default=None)
@@ -129,6 +117,8 @@ def main():
     parser.add_argument("--no-ingest", action="store_true")
     parser.add_argument("--output", help="Override output path")
     args = parser.parse_args()
+
+    kb_root = resolve_kb_root(args)
 
     if args.stdin:
         content = sys.stdin.read()
@@ -159,7 +149,7 @@ def main():
     else:
         meta["tags"] = []
 
-    output_path = Path(args.output) if args.output else build_output_path(meta["title"], today)
+    output_path = Path(args.output) if args.output else build_output_path(kb_root, meta["title"], today)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     fm_out = {k: v for k, v in meta.items() if v}
@@ -169,7 +159,7 @@ def main():
     print(f"✓ Proposal saved: {output_path}")
 
     if not args.no_ingest:
-        cfg = load_config()
+        cfg = load_config(kb_root)
         chunks = ingest_proposal(body, meta, output_path, cfg)
         print(f"✓ Ingested {chunks} chunks into [insights]")
         print(f"  Title:   {meta['title']}")

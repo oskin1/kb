@@ -6,9 +6,10 @@ For each chunk window, uses an LLM to extract entities (materials, processes, pr
 resolves duplicates against existing entities via embedding + LLM check, then upserts to Qdrant.
 
 Usage:
-    python scripts/entity_extract.py --doc-id <doc_id>         # extract from indexed doc
-    python scripts/entity_extract.py --doc-id <doc_id> --dry-run  # print without storing
-    python scripts/entity_extract.py --all                      # process all unprocessed docs
+    python scripts/entity_extract.py --doc-id <doc_id> --kb-root /path/to/kb
+    python scripts/entity_extract.py --doc-id <doc_id> --kb-root ~/kb --dry-run
+    python scripts/entity_extract.py --all --kb-root ~/kb
+    python scripts/entity_extract.py --list-entities --kb-root ~/kb
 
 Called automatically by ingest.py after chunking (unless --no-entities flag is passed).
 
@@ -26,36 +27,23 @@ from pathlib import Path
 from typing import Optional
 
 import ollama as ollama_client
-import yaml
 from qdrant_client import QdrantClient
 from qdrant_client.models import (Filter, FieldCondition, MatchValue, PointStruct,
                                    MatchAny, SetPayload)
 
-CONFIG_PATH = Path(__file__).parent.parent / "config" / "config.yaml"
-KB_DIR = Path(__file__).parent.parent
-
-def load_env():
-    """Load .env from kb/ directory if present."""
-    env_file = KB_DIR / ".env"
-    if env_file.exists():
-        from dotenv import load_dotenv
-        load_dotenv(env_file)
-        return True
-    return False
-
+from kb_root import add_kb_root_arg, resolve_kb_root, load_config, kb_root_from_cfg
 from domain_config import get_entity_types, get_prompts
-
-ENTITY_TYPES = get_entity_types()  # loaded from config/domain.yaml
 
 # ─── Prompts (loaded from config/domain.yaml) ────────────────────────────────
 
 
-def _get_extraction_prompt() -> str:
-    prompts = get_prompts()
+def _get_extraction_prompt(kb_root: Path) -> str:
+    entity_types = get_entity_types(kb_root)
+    prompts = get_prompts(kb_root)
     custom = prompts.get("entity_extraction_user")
     if custom:
         # Inject entity types list into the prompt template
-        return custom.replace("{entity_types}", str(sorted(ENTITY_TYPES)))
+        return custom.replace("{entity_types}", str(sorted(entity_types)))
     return """\
 <PREVIOUS_CHUNKS>
 {previous_chunks}
@@ -65,13 +53,13 @@ def _get_extraction_prompt() -> str:
 </CURRENT_CHUNK>
 
 Extract named entities from the CURRENT_CHUNK.
-For each entity provide name, type (one of """ + str(sorted(ENTITY_TYPES)) + """), and summary.
+For each entity provide name, type (one of """ + str(sorted(entity_types)) + """), and summary.
 Respond with a JSON array or [].
 """
 
 
-def _get_resolution_prompt() -> str:
-    prompts = get_prompts()
+def _get_resolution_prompt(kb_root: Path) -> str:
+    prompts = get_prompts(kb_root)
     custom = prompts.get("entity_resolution_user")
     if custom:
         return custom
@@ -88,11 +76,6 @@ Respond with JSON: {{"is_duplicate": true/false, "existing_entity_id": "<uuid or
 """
 
 # ─── Config + clients ─────────────────────────────────────────────────────────
-
-def load_config():
-    load_env()  # load .env before config so env vars are available
-    with open(CONFIG_PATH) as f:
-        return yaml.safe_load(f)
 
 
 class LLMClient:
@@ -125,7 +108,8 @@ class LLMClient:
             sys.exit(1)
 
     def call(self, prompt: str) -> str:
-        prompts = get_prompts()
+        kb_root = kb_root_from_cfg(self.cfg)
+        prompts = get_prompts(kb_root)
         system = prompts.get(
             "entity_extraction_system",
             "You are a precise entity extractor for a research knowledge base. "
@@ -172,10 +156,12 @@ def parse_json_response(raw: str) -> any:
 
 
 def extract_entities_from_window(llm: LLMClient,
-                                  current_chunk: str, previous_chunks: list[str]) -> list[dict]:
+                                  current_chunk: str, previous_chunks: list[str],
+                                  kb_root: Path) -> list[dict]:
     """Call LLM to extract entities from a chunk window. Returns list of {name, type, summary}."""
+    entity_types = get_entity_types(kb_root)
     prev_text = "\n---\n".join(previous_chunks) if previous_chunks else "(none)"
-    prompt = _get_extraction_prompt().format(
+    prompt = _get_extraction_prompt(kb_root).format(
         previous_chunks=prev_text,
         current_chunk=current_chunk,
     )
@@ -188,7 +174,7 @@ def extract_entities_from_window(llm: LLMClient,
         for e in result:
             if isinstance(e, dict) and "name" in e and "type" in e and "summary" in e:
                 e["type"] = e["type"].lower()
-                if e["type"] not in ENTITY_TYPES:
+                if e["type"] not in entity_types:
                     e["type"] = "concept"
                 valid.append(e)
         return valid
@@ -197,7 +183,8 @@ def extract_entities_from_window(llm: LLMClient,
 
 
 def resolve_entity(llm: LLMClient,
-                   new_entity: dict, candidates: list[dict]) -> dict:
+                   new_entity: dict, candidates: list[dict],
+                   kb_root: Path) -> dict:
     """
     Check if new_entity is a duplicate of any candidate.
     Returns: {is_duplicate, existing_entity_id, canonical_name}
@@ -213,7 +200,7 @@ def resolve_entity(llm: LLMClient,
     new_text = json.dumps({"name": new_entity["name"], "summary": new_entity["summary"]},
                           ensure_ascii=False)
 
-    prompt = _get_resolution_prompt().format(
+    prompt = _get_resolution_prompt(kb_root).format(
         existing_entities=existing_text,
         new_entity=new_text,
     )
@@ -371,6 +358,7 @@ def process_doc(doc_id: str, cfg: dict, llm: LLMClient, qdrant: QdrantClient,
     Extract entities from all chunks of doc_id.
     Returns list of entity_ids stored/updated.
     """
+    kb_root = kb_root_from_cfg(cfg)
     embed_model = cfg["embedding"]["model"]
     research_col = cfg["collections"]["research_docs"]
     entities_col = cfg.get("collections_extra", {}).get("entities", "entities")
@@ -419,7 +407,7 @@ def process_doc(doc_id: str, cfg: dict, llm: LLMClient, qdrant: QdrantClient,
             print(f"  chunk {chunk_index+1}/{total}...", end=" ", flush=True)
 
         # LLM extraction
-        candidates = extract_entities_from_window(llm, chunk_text, prev_texts)
+        candidates = extract_entities_from_window(llm, chunk_text, prev_texts, kb_root)
 
         if not candidates:
             if verbose:
@@ -444,7 +432,7 @@ def process_doc(doc_id: str, cfg: dict, llm: LLMClient, qdrant: QdrantClient,
             similar = search_similar_entities(qdrant, entities_col, embedding)
 
             # LLM resolution
-            resolution = resolve_entity(llm, ent, similar)
+            resolution = resolve_entity(llm, ent, similar, kb_root)
 
             if resolution["is_duplicate"] and resolution["existing_entity_id"]:
                 existing_id = resolution["existing_entity_id"]
@@ -589,13 +577,14 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python scripts/entity_extract.py --doc-id 1494731e-xxxx
-  python scripts/entity_extract.py --doc-id 1494731e-xxxx --dry-run --verbose
-  python scripts/entity_extract.py --all               # all unprocessed docs
-  python scripts/entity_extract.py --list-entities
-  python scripts/entity_extract.py --list-entities --type material
+  python scripts/entity_extract.py --doc-id 1494731e-xxxx --kb-root ~/my-kb
+  python scripts/entity_extract.py --doc-id 1494731e-xxxx --kb-root ~/my-kb --dry-run --verbose
+  python scripts/entity_extract.py --all --kb-root ~/my-kb
+  python scripts/entity_extract.py --list-entities --kb-root ~/my-kb
+  python scripts/entity_extract.py --list-entities --kb-root ~/my-kb --type material
         """,
     )
+    add_kb_root_arg(parser)
     parser.add_argument("--doc-id", dest="doc_id", help="Process a specific doc_id")
     parser.add_argument("--all", action="store_true",
                         help="Process all docs without mentioned_entities")
@@ -607,10 +596,11 @@ Examples:
                         help="List all stored entities and exit")
     parser.add_argument("--domain", help="Filter --list-entities by domain")
     parser.add_argument("--type", dest="entity_type",
-                        help=f"Filter --list-entities by type ({', '.join(sorted(ENTITY_TYPES))})")
+                        help="Filter --list-entities by type")
     args = parser.parse_args()
 
-    cfg = load_config()
+    kb_root = resolve_kb_root(args)
+    cfg = load_config(kb_root)
     qdrant = get_qdrant_client(cfg)
     entities_col = cfg.get("collections_extra", {}).get("entities", "entities")
 

@@ -3,18 +3,8 @@
 fetch_url.py — Download a web page and save it to kb/raw/web/ for ingestion.
 
 Usage:
-    python scripts/fetch_url.py <url> [options]
-
-Options:
-    --output    Output filename (auto-generated from URL if not set)
-    --meta      Sidecar metadata as key=value pairs (written to .yaml sidecar)
-    --ingest    Auto-ingest after download (calls ingest.py)
-    --collection  Target collection for ingest (default: research_docs)
-
-Examples:
-    python scripts/fetch_url.py https://example.com/article
-    python scripts/fetch_url.py https://example.com/article --meta domain=mydomain project=myproject --ingest
-    python scripts/fetch_url.py https://example.com/article --output my_article.html --ingest
+    python scripts/fetch_url.py <url> --kb-root /path/to/kb [options]
+    python scripts/fetch_url.py https://example.com/article --kb-root ~/kb --ingest
 """
 
 import argparse
@@ -29,18 +19,17 @@ from urllib.parse import urlparse
 import requests
 from bs4 import BeautifulSoup
 
-RAW_WEB_DIR = Path(__file__).parent.parent / "raw" / "web"
+from kb_root import add_kb_root_arg, resolve_kb_root, raw_dir
+
 SCRIPTS_DIR = Path(__file__).parent
 
 
 def url_to_filename(url: str) -> str:
     """Generate a safe filename from a URL."""
     parsed = urlparse(url)
-    # Use netloc + path, strip leading slash, replace non-alphanum with _
     slug = parsed.netloc + parsed.path
     slug = re.sub(r"[^a-zA-Z0-9._-]", "_", slug)
     slug = re.sub(r"_+", "_", slug).strip("_")
-    # Truncate to reasonable length
     if len(slug) > 80:
         slug = slug[:80]
     return slug + ".html"
@@ -74,7 +63,6 @@ def fetch_url(url: str, output_path: Path) -> dict:
     title_tag = soup.find("title")
     meta["title"] = title_tag.get_text().strip() if title_tag else output_path.stem
 
-    # Try og:description or meta description
     desc = (
         soup.find("meta", property="og:description")
         or soup.find("meta", attrs={"name": "description"})
@@ -82,7 +70,6 @@ def fetch_url(url: str, output_path: Path) -> dict:
     if desc and desc.get("content"):
         meta["description"] = desc["content"].strip()[:500]
 
-    # Published date (best-effort)
     for prop in ["article:published_time", "og:updated_time", "datePublished"]:
         d = soup.find("meta", property=prop) or soup.find("meta", attrs={"name": prop})
         if d and d.get("content"):
@@ -93,7 +80,6 @@ def fetch_url(url: str, output_path: Path) -> dict:
     meta["source_type"] = "web"
     meta["_fetched"] = date.today().isoformat()
 
-    # Save raw HTML (ingest.py will parse it again with BeautifulSoup)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(html, encoding="utf-8")
     print(f"  Saved: {output_path} ({len(html)//1024} KB)")
@@ -105,7 +91,6 @@ def write_sidecar(output_path: Path, auto_meta: dict, extra_meta: dict):
     """Write merged metadata to .yaml sidecar alongside the HTML file."""
     sidecar_path = output_path.with_suffix(".yaml")
     merged = {**auto_meta, **extra_meta}
-    # Set sensible defaults if not provided
     merged.setdefault("domain", "cross")
     merged.setdefault("source_type", "web")
     merged.setdefault("confidence", "probable")
@@ -117,7 +102,7 @@ def write_sidecar(output_path: Path, auto_meta: dict, extra_meta: dict):
     return sidecar_path
 
 
-def run_ingest(output_path: Path, collection: str, extra_meta: dict):
+def run_ingest(output_path: Path, collection: str, extra_meta: dict, kb_root_str: str):
     """Run ingest.py on the downloaded file."""
     ingest_script = SCRIPTS_DIR / "ingest.py"
     python = sys.executable
@@ -130,6 +115,7 @@ def run_ingest(output_path: Path, collection: str, extra_meta: dict):
             meta_args += ["--meta", f"{k}={v}"]
 
     cmd = [python, str(ingest_script), str(output_path),
+           "--kb-root", kb_root_str,
            "--collection", collection] + meta_args
 
     print(f"\n  Running ingest...")
@@ -140,6 +126,7 @@ def run_ingest(output_path: Path, collection: str, extra_meta: dict):
 def main():
     parser = argparse.ArgumentParser(description="Fetch URL and save to kb/raw/web/")
     parser.add_argument("url", help="URL to fetch")
+    add_kb_root_arg(parser)
     parser.add_argument("--output", help="Output filename (default: auto from URL)")
     parser.add_argument("--meta", nargs="*", default=[],
                         help="Metadata as key=value pairs")
@@ -149,6 +136,8 @@ def main():
                         choices=["research_docs", "data_tables", "insights"],
                         help="Target collection for ingest (default: research_docs)")
     args = parser.parse_args()
+
+    kb_root = resolve_kb_root(args)
 
     # Parse extra metadata
     extra_meta = {}
@@ -164,7 +153,7 @@ def main():
     filename = args.output if args.output else url_to_filename(args.url)
     if not filename.endswith((".html", ".htm")):
         filename += ".html"
-    output_path = RAW_WEB_DIR / filename
+    output_path = raw_dir(kb_root, "web") / filename
 
     # Fetch
     try:
@@ -178,7 +167,7 @@ def main():
 
     # Ingest if requested
     if args.ingest:
-        ok = run_ingest(output_path, args.collection, extra_meta)
+        ok = run_ingest(output_path, args.collection, extra_meta, str(kb_root))
         if ok:
             print(f"\n  ✓ Ingested into [{args.collection}]")
         else:
@@ -186,7 +175,7 @@ def main():
             sys.exit(1)
     else:
         print(f"\n  Done. To ingest:")
-        print(f"    python scripts/ingest.py {output_path}")
+        print(f"    python scripts/ingest.py {output_path} --kb-root {kb_root}")
 
     print(f"\n  Title:  {auto_meta.get('title', '(unknown)')}")
     print(f"  Source: {args.url}")

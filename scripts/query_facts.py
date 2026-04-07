@@ -3,38 +3,21 @@
 query_facts.py — Semantic search over the facts collection.
 
 Usage:
-    python scripts/query_facts.py "your search query"
-    python scripts/query_facts.py --subject "Entity Name"
-    python scripts/query_facts.py --relation CONTAINS
-    python scripts/query_facts.py --relation CONTAINS --subject "Entity Name"
-    python scripts/query_facts.py "topic" --domain mydomain --top 10
-    python scripts/query_facts.py "topic" --as-of 2024-01-01
+    python scripts/query_facts.py "your search query" --kb-root /path/to/kb
+    python scripts/query_facts.py --subject "Entity Name" --kb-root ~/kb
+    python scripts/query_facts.py --relation CONTAINS --kb-root ~/kb
+    python scripts/query_facts.py "topic" --kb-root ~/kb --domain mydomain --top 10
+    python scripts/query_facts.py "topic" --kb-root ~/kb --as-of 2024-01-01
 """
 
 import argparse
 import sys
-from pathlib import Path
 
 import ollama as ollama_client
-import yaml
 from qdrant_client import QdrantClient
 from qdrant_client.models import Filter, FieldCondition, MatchValue
 
-CONFIG_PATH = Path(__file__).parent.parent / "config" / "config.yaml"
-KB_DIR = Path(__file__).parent.parent
-
-
-def load_env():
-    env_file = KB_DIR / ".env"
-    if env_file.exists():
-        from dotenv import load_dotenv
-        load_dotenv(env_file)
-
-
-def load_config():
-    load_env()
-    with open(CONFIG_PATH) as f:
-        return yaml.safe_load(f)
+from kb_root import add_kb_root_arg, resolve_kb_root, load_config
 
 
 def embed_text(text: str, model: str) -> list[float]:
@@ -192,6 +175,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("query", nargs="?", help="Semantic search query")
+    add_kb_root_arg(parser)
     parser.add_argument("--subject", help="Filter by subject entity name")
     parser.add_argument("--relation", help="Filter by relation_type (e.g. CONTAINS)")
     parser.add_argument("--domain", help="Filter by domain")
@@ -203,7 +187,8 @@ def main():
         parser.print_help()
         return
 
-    cfg = load_config()
+    kb_root = resolve_kb_root(args)
+    cfg = load_config(kb_root)
 
     as_of = None
     if args.as_of:

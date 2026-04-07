@@ -3,18 +3,19 @@
 ingest.py — Ingest documents into the Qdrant knowledge base.
 
 Usage:
-    python ingest.py <file_or_dir> [--collection research_docs|data_tables|insights]
+    python ingest.py <file_or_dir> --kb-root /path/to/kb
+                                   [--collection research_docs|data_tables|insights]
                                    [--meta key=value ...]
                                    [--valid-at YYYY-MM-DD|YYYY-QN|YYYY-MM|YYYY]
                                    [--invalid-at YYYY-MM-DD|YYYY-QN|YYYY-MM|YYYY]
                                    [--supersedes <doc_id>]
 
 Examples:
-    python ingest.py raw/papers/document.pdf
-    python ingest.py raw/papers/ --collection research_docs
-    python ingest.py raw/papers/document.pdf --meta project=myproject domain=mydomain
-    python ingest.py raw/data/data_2025.csv --valid-at 2025-Q1
-    python ingest.py raw/papers/new_doc.pdf --supersedes 1494731e-xxxx
+    python ingest.py raw/papers/document.pdf --kb-root ~/my-kb
+    python ingest.py raw/papers/ --kb-root ~/my-kb --collection research_docs
+    python ingest.py raw/papers/document.pdf --kb-root ~/my-kb --meta project=myproject domain=mydomain
+    python ingest.py raw/data/data_2025.csv --kb-root ~/my-kb --valid-at 2025-Q1
+    python ingest.py raw/papers/new_doc.pdf --kb-root ~/my-kb --supersedes 1494731e-xxxx
 
 Temporal shorthand: 2024 → 2024-01-01, 2024-Q3 → 2024-07-01, 2024-03 → 2024-03-01
 Sidecar YAML (optional, same path as file but .yaml extension) overrides auto metadata.
@@ -35,7 +36,7 @@ from qdrant_client.models import PointStruct
 from llama_index.core.node_parser import SentenceSplitter
 import ollama as ollama_client
 
-CONFIG_PATH = Path(__file__).parent.parent / "config" / "config.yaml"
+from kb_root import add_kb_root_arg, resolve_kb_root, load_config
 
 SUPPORTED_EXTENSIONS = {".pdf", ".txt", ".md", ".html", ".htm", ".csv"}
 
@@ -78,10 +79,6 @@ def parse_date_shorthand(value: str) -> str | None:
 
     raise ValueError(f"Unrecognised date format: '{value}'. "
                      "Use YYYY, YYYY-QN, YYYY-MM, or YYYY-MM-DD.")
-
-def load_config():
-    with open(CONFIG_PATH) as f:
-        return yaml.safe_load(f)
 
 def load_sidecar(file_path: Path) -> dict:
     sidecar = file_path.with_suffix(".yaml")
@@ -300,10 +297,11 @@ Temporal date formats: YYYY, YYYY-QN, YYYY-MM, YYYY-MM-DD
   Examples: 2024, 2024-Q3, 2024-03, 2024-03-15
 
 Supersedes example (replacing an old economics report):
-  python ingest.py new_prices.csv --valid-at 2025-Q1 --supersedes <old_doc_id>
+  python ingest.py new_prices.csv --kb-root ~/my-kb --valid-at 2025-Q1 --supersedes <old_doc_id>
         """,
     )
     parser.add_argument("path", help="File or directory to ingest")
+    add_kb_root_arg(parser)
     parser.add_argument("--collection", default="research_docs",
                         choices=["research_docs", "data_tables", "insights"],
                         help="Target collection (default: research_docs)")
@@ -321,7 +319,8 @@ Supersedes example (replacing an old economics report):
                         help="doc_id of older document this replaces; marks it as superseded")
     args = parser.parse_args()
 
-    cfg = load_config()
+    kb_root = resolve_kb_root(args)
+    cfg = load_config(kb_root)
 
     # Parse date shorthands
     try:

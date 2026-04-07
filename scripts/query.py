@@ -3,14 +3,14 @@
 query.py — Hybrid search (cosine + BM25 + re-ranking) over the Qdrant knowledge base.
 
 Usage:
-    python query.py "your search query"
-    python query.py "exact term" --bm25                   # keyword-only
-    python query.py "data query" --collection data_tables
-    python query.py "topic" --domain mydomain --project myproject --top 10
-    python query.py "query" --lang ru --confidence established
-    python query.py "" --list-docs                        # list indexed documents
-    python query.py "topic" --as-of 2024-01-01            # temporal filter
-    python query.py "topic" --no-rerank                   # fast, skip re-ranking
+    python query.py "your search query" --kb-root /path/to/kb
+    python query.py "exact term" --kb-root ~/kb --bm25                   # keyword-only
+    python query.py "data query" --kb-root ~/kb --collection data_tables
+    python query.py "topic" --kb-root ~/kb --domain mydomain --project myproject --top 10
+    python query.py "query" --kb-root ~/kb --lang ru --confidence established
+    python query.py "" --kb-root ~/kb --list-docs                        # list indexed documents
+    python query.py "topic" --kb-root ~/kb --as-of 2024-01-01            # temporal filter
+    python query.py "topic" --kb-root ~/kb --no-rerank                   # fast, skip re-ranking
 
 Default mode: hybrid (cosine + BM25 via RRF) → cross-encoder re-ranking.
 Re-ranking uses BAAI/bge-reranker-v2-m3 (multilingual RU+EN, local via sentence-transformers).
@@ -27,9 +27,7 @@ Without --as-of: all chunks returned, superseded ones tagged [SUPERSEDED].
 """
 
 import argparse
-import yaml
 from datetime import date as date_type
-from pathlib import Path
 from functools import lru_cache
 
 import ollama as ollama_client
@@ -38,11 +36,7 @@ from qdrant_client.models import (Filter, FieldCondition, MatchValue, MatchAny,
                                    IsNullCondition, IsEmptyCondition,
                                    Range, DatetimeRange, MatchText)
 
-CONFIG_PATH = Path(__file__).parent.parent / "config" / "config.yaml"
-
-def load_config():
-    with open(CONFIG_PATH) as f:
-        return yaml.safe_load(f)
+from kb_root import add_kb_root_arg, resolve_kb_root, load_config
 
 def embed_query(text: str, model: str) -> list[float]:
     return ollama_client.embed(model=model, input=[text])["embeddings"][0]
@@ -99,17 +93,7 @@ def build_filter(domain=None, subdomain=None, source_type=None,
         must_conditions.append(FieldCondition(key="tags", match=MatchAny(any=tag_list)))
 
     if as_of:
-        # Case A: valid_at is null (timeless content — always include)
-        timeless_condition = Filter(
-            must=[IsNullCondition(is_null={"key": "valid_at"})]
-        )
-
-        # Case B: valid_at <= as_of AND (invalid_at is null OR invalid_at > as_of)
-        # Qdrant KEYWORD index stores dates as strings; lexicographic comparison works for ISO dates
-        # We use MatchValue with range hack: store as keyword, filter in Python post-fetch
         # NOTE: Qdrant range filters work on float/int. For date strings we filter post-query.
-        # So: include everything that passes must_conditions, then filter in Python by as_of.
-        # This is the pragmatic approach until we switch to datetime payload type.
         # The as_of filter is applied as a post-filter in the search() function.
         pass  # post-filter applied in search()
 
@@ -435,6 +419,7 @@ def main():
         """,
     )
     parser.add_argument("query", nargs="?", help="Search query text")
+    add_kb_root_arg(parser)
     parser.add_argument("--collection", default="research_docs",
                         choices=["research_docs", "data_tables", "insights"])
     parser.add_argument("--top", type=int, default=5, help="Number of results (default: 5)")
@@ -464,7 +449,8 @@ def main():
                         help="Only return content valid on this date (YYYY, YYYY-QN, YYYY-MM, YYYY-MM-DD)")
     args = parser.parse_args()
 
-    cfg = load_config()
+    kb_root = resolve_kb_root(args)
+    cfg = load_config(kb_root)
     client = QdrantClient(host=cfg["qdrant"]["host"], port=cfg["qdrant"]["port"])
 
     # Parse --as-of date

@@ -8,11 +8,10 @@ plus an LLM to identify relationships between them, deduplicates against existin
 facts, extracts temporal validity, and stores results.
 
 Usage:
-    python scripts/fact_extract.py --doc-id <doc_id>
-    python scripts/fact_extract.py --doc-id <doc_id> --dry-run --verbose
-    python scripts/fact_extract.py --all              # all docs with entities but no facts
-    python scripts/fact_extract.py --list-facts [--subject "Tungsten Carbide"]
-    python scripts/fact_extract.py --list-facts [--relation CONTAINS]
+    python scripts/fact_extract.py --doc-id <doc_id> --kb-root /path/to/kb
+    python scripts/fact_extract.py --doc-id <doc_id> --kb-root ~/kb --dry-run --verbose
+    python scripts/fact_extract.py --all --kb-root ~/kb
+    python scripts/fact_extract.py --list-facts --kb-root ~/kb [--subject "Entity"]
 
 Called automatically by entity_extract.py after entity processing (unless --no-facts).
 """
@@ -27,32 +26,17 @@ from pathlib import Path
 from typing import Optional
 
 import ollama as ollama_client
-import yaml
 from qdrant_client import QdrantClient
 from qdrant_client.models import (Filter, FieldCondition, MatchValue,
                                    PointStruct, SetPayload)
 
-CONFIG_PATH = Path(__file__).parent.parent / "config" / "config.yaml"
-KB_DIR = Path(__file__).parent.parent
-
-
-def load_env():
-    env_file = KB_DIR / ".env"
-    if env_file.exists():
-        from dotenv import load_dotenv
-        load_dotenv(env_file)
-
-
-def load_config():
-    load_env()
-    with open(CONFIG_PATH) as f:
-        return yaml.safe_load(f)
+from kb_root import add_kb_root_arg, resolve_kb_root, load_config, kb_root_from_cfg
+from domain_config import get_relations_for_domain
 
 
 # ─── LLM client (reuse from entity_extract) ───────────────────────────────────
 
 def get_llm_client(cfg: dict):
-    sys.path.insert(0, str(Path(__file__).parent))
     from entity_extract import LLMClient
     return LLMClient(cfg)
 
@@ -63,12 +47,10 @@ def get_qdrant_client(cfg: dict) -> QdrantClient:
 
 # ─── Prompts ──────────────────────────────────────────────────────────────────
 
-from domain_config import get_relations_for_domain
-
 
 # Domain-aware relation ontology — loaded from config/domain.yaml
-def _ontology_for_domain(domain: str) -> list[str]:
-    return get_relations_for_domain(domain)
+def _ontology_for_domain(kb_root: Path, domain: str) -> list[str]:
+    return get_relations_for_domain(kb_root, domain)
 
 
 FACT_EXTRACTION_PROMPT = """\
@@ -327,7 +309,7 @@ def get_entity_names(qdrant: QdrantClient, entities_col: str,
 # ─── LLM steps ────────────────────────────────────────────────────────────────
 
 def extract_facts_from_chunk(llm, chunk_text: str, entities: dict[str, str],
-                             domain: str = "cross") -> list[dict]:
+                             kb_root: Path, domain: str = "cross") -> list[dict]:
     """
     entities: {entity_id: name}
     domain: used to inject domain-specific relation ontology into the prompt
@@ -340,7 +322,7 @@ def extract_facts_from_chunk(llm, chunk_text: str, entities: dict[str, str],
         [{"name": name} for name in entities.values()],
         ensure_ascii=False
     )
-    allowed_types = _ontology_for_domain(domain)
+    allowed_types = _ontology_for_domain(kb_root, domain)
     relation_types = "\n".join(f"  {r}" for r in allowed_types)
     prompt = FACT_EXTRACTION_PROMPT.format(
         chunk_text=chunk_text,
@@ -369,7 +351,7 @@ def extract_facts_from_chunk(llm, chunk_text: str, entities: dict[str, str],
             f["confidence"] = f.get("confidence", "probable")
             rel = f["relation_type"].upper().replace(" ", "_")
             # Validate against ontology; unknown types fall back to RELATED_TO
-            allowed_set = {r.upper() for r in _ontology_for_domain(domain)}
+            allowed_set = {r.upper() for r in _ontology_for_domain(kb_root, domain)}
             f["relation_type"] = rel if rel in allowed_set else "RELATED_TO"
             valid.append(f)
         return valid
@@ -435,6 +417,7 @@ def process_doc(doc_id: str, cfg: dict, llm, qdrant: QdrantClient,
     Extract facts from all chunks of doc_id.
     Returns count of facts stored/skipped.
     """
+    kb_root = kb_root_from_cfg(cfg)
     embed_model = cfg["embedding"]["model"]
     research_col = cfg["collections"]["research_docs"]
     entities_col = cfg.get("collections_extra", {}).get("entities", "entities")
@@ -492,7 +475,8 @@ def process_doc(doc_id: str, cfg: dict, llm, qdrant: QdrantClient,
                   end=" ", flush=True)
 
         # LLM fact extraction (domain-aware ontology)
-        raw_facts = extract_facts_from_chunk(llm, chunk_text, entity_map, domain=doc_domain)
+        raw_facts = extract_facts_from_chunk(llm, chunk_text, entity_map,
+                                             kb_root, domain=doc_domain)
 
         if not raw_facts:
             if verbose:
@@ -682,13 +666,13 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python scripts/fact_extract.py --doc-id 1494731e-xxxx --verbose
-  python scripts/fact_extract.py --all
-  python scripts/fact_extract.py --list-facts
-  python scripts/fact_extract.py --list-facts --subject "Tungsten Carbide"
-  python scripts/fact_extract.py --list-facts --relation CONTAINS
+  python scripts/fact_extract.py --doc-id 1494731e-xxxx --kb-root ~/my-kb --verbose
+  python scripts/fact_extract.py --all --kb-root ~/my-kb
+  python scripts/fact_extract.py --list-facts --kb-root ~/my-kb
+  python scripts/fact_extract.py --list-facts --kb-root ~/my-kb --subject "Tungsten Carbide"
         """,
     )
+    add_kb_root_arg(parser)
     parser.add_argument("--doc-id", dest="doc_id", help="Process a specific doc_id")
     parser.add_argument("--all", action="store_true",
                         help="Process all docs with entities but without facts")
@@ -705,7 +689,8 @@ Examples:
                         help="Max facts to show with --list-facts (default: 50)")
     args = parser.parse_args()
 
-    cfg = load_config()
+    kb_root = resolve_kb_root(args)
+    cfg = load_config(kb_root)
     qdrant = get_qdrant_client(cfg)
     facts_col = cfg.get("collections_extra", {}).get("facts", "facts")
 

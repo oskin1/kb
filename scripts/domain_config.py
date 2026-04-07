@@ -7,32 +7,35 @@ in config/domain.yaml — no hardcoded domain knowledge in the codebase.
 """
 
 from pathlib import Path
-from functools import lru_cache
 
 import yaml
 
-DOMAIN_CONFIG_PATH = Path(__file__).parent.parent / "config" / "domain.yaml"
+from kb_root import domain_config_path
+
+# Module-level cache keyed by kb_root to avoid re-reading per call.
+_cache: dict[Path, dict] = {}
 
 
-@lru_cache(maxsize=1)
-def load_domain_config() -> dict:
-    with open(DOMAIN_CONFIG_PATH) as f:
-        return yaml.safe_load(f)
+def load_domain_config(kb_root: Path) -> dict:
+    if kb_root not in _cache:
+        with open(domain_config_path(kb_root)) as f:
+            _cache[kb_root] = yaml.safe_load(f)
+    return _cache[kb_root]
 
 
-def get_domains() -> dict:
+def get_domains(kb_root: Path) -> dict:
     """Return the domains dict from config."""
-    return load_domain_config().get("domains", {})
+    return load_domain_config(kb_root).get("domains", {})
 
 
-def get_entity_types() -> set[str]:
+def get_entity_types(kb_root: Path) -> set[str]:
     """Return the set of valid entity types."""
-    return set(load_domain_config().get("entity_types", ["concept"]))
+    return set(load_domain_config(kb_root).get("entity_types", ["concept"]))
 
 
-def get_domain_keywords() -> dict[str, list[str]]:
+def get_domain_keywords(kb_root: Path) -> dict[str, list[str]]:
     """Return {domain_name: [keywords]} for query routing."""
-    domains = get_domains()
+    domains = get_domains(kb_root)
     return {
         name: cfg.get("keywords", [])
         for name, cfg in domains.items()
@@ -40,22 +43,22 @@ def get_domain_keywords() -> dict[str, list[str]]:
     }
 
 
-def get_relation_ontology() -> dict[str, list[str]]:
+def get_relation_ontology(kb_root: Path) -> dict[str, list[str]]:
     """Return {domain_name: [RELATION_TYPE, ...]} for fact extraction."""
-    domains = get_domains()
+    domains = get_domains(kb_root)
     return {
         name: cfg.get("relations", [])
         for name, cfg in domains.items()
     }
 
 
-def get_relations_for_domain(domain: str) -> list[str]:
+def get_relations_for_domain(kb_root: Path, domain: str) -> list[str]:
     """Return allowed relation types for a given domain.
 
     Merges the domain's own relations with the fallback 'general' relations.
     If domain is not found, returns all relations from all domains.
     """
-    ontology = get_relation_ontology()
+    ontology = get_relation_ontology(kb_root)
     general = ontology.get("general", ["RELATED_TO"])
 
     if domain in ontology:
@@ -72,17 +75,17 @@ def get_relations_for_domain(domain: str) -> list[str]:
     return all_rels
 
 
-def get_prompts() -> dict:
+def get_prompts(kb_root: Path) -> dict:
     """Return the prompts section from domain config."""
-    return load_domain_config().get("prompts", {})
+    return load_domain_config(kb_root).get("prompts", {})
 
 
-def detect_domain(query: str) -> str | None:
+def detect_domain(kb_root: Path, query: str) -> str | None:
     """Auto-detect domain from query text using keyword matching.
 
     Returns domain name or None (meaning cross/no strong signal).
     """
-    keywords = get_domain_keywords()
+    keywords = get_domain_keywords(kb_root)
     if not keywords:
         return None
 

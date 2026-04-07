@@ -7,23 +7,10 @@ the query text. Searches research_docs, insights, AND facts in parallel,
 then merges and ranks results.
 
 Usage:
-    python scripts/route_query.py "your search query"
-    python scripts/route_query.py "specific topic" --domain mydomain
-    python scripts/route_query.py "broad query" --top 8
-    python scripts/route_query.py "topic" --collections docs,insights
-    python scripts/route_query.py "topic" --facts-only
-    python scripts/route_query.py "USED_IN relation" --relation USED_IN
-
-Domain routing rules are defined in config/domain.yaml.
-Each domain has keywords for auto-detection from query text.
-
-Collections:
-    research_docs  — chunked papers, web pages, reports
-    insights       — agent notes, proposals, projects
-    facts          — typed entity relationships (entity graph)
-    entities       — named entities (used for entity lookup, not text search)
-
-Output: merged ranked results with source-collection labels.
+    python scripts/route_query.py "your search query" --kb-root /path/to/kb
+    python scripts/route_query.py "specific topic" --kb-root ~/kb --domain mydomain
+    python scripts/route_query.py "broad query" --kb-root ~/kb --top 8
+    python scripts/route_query.py "topic" --kb-root ~/kb --facts-only
 """
 
 import argparse
@@ -32,15 +19,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import ollama as ollama_client
-import yaml
 from qdrant_client import QdrantClient
 from qdrant_client.models import Filter, FieldCondition, MatchValue
 
-CONFIG_PATH = Path(__file__).parent.parent / "config" / "config.yaml"
-
-# ── Domain keyword routing (loaded from config/domain.yaml) ──────────────────
-
-from domain_config import detect_domain  # noqa: E402 — import after sys.path setup
+from kb_root import add_kb_root_arg, resolve_kb_root, load_config, kb_root_from_cfg
+from domain_config import detect_domain
 
 
 # ── Embedding ─────────────────────────────────────────────────────────────────
@@ -56,9 +39,7 @@ def search_collection(client: QdrantClient, collection: str, vector: list[float]
                        domain: str | None, top: int) -> list[dict]:
     """Search a single collection. Returns list of result dicts."""
     must = []
-    if domain and collection != "facts":
-        must.append(FieldCondition(key="domain", match=MatchValue(value=domain)))
-    elif domain and collection == "facts":
+    if domain:
         must.append(FieldCondition(key="domain", match=MatchValue(value=domain)))
     filt = Filter(must=must) if must else None
 
@@ -172,19 +153,11 @@ def main():
     parser = argparse.ArgumentParser(
         description="Smart query router — searches all relevant KB collections",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  python scripts/route_query.py "search query"
-  python scripts/route_query.py "topic" --domain mydomain
-  python scripts/route_query.py "topic USED_IN" --relation USED_IN
-  python scripts/route_query.py "topic" --collections docs,insights
-  python scripts/route_query.py "topic" --facts-only
-        """,
     )
     parser.add_argument("query", help="Search query text")
+    add_kb_root_arg(parser)
     parser.add_argument("--domain",
-                        help="Override domain filter (as defined in config/domain.yaml). "
-                             "Auto-detected if not set.")
+                        help="Override domain filter (auto-detected if not set)")
     parser.add_argument("--top", type=int, default=5,
                         help="Results per collection (default: 5)")
     parser.add_argument("--merged-top", type=int, default=10,
@@ -195,13 +168,13 @@ Examples:
     parser.add_argument("--facts-only", action="store_true",
                         help="Search only the facts collection")
     parser.add_argument("--relation",
-                        help="Filter facts by relation type (e.g. CONTAINS, USED_IN, HAS_PROPERTY)")
+                        help="Filter facts by relation type (e.g. CONTAINS, USED_IN)")
     parser.add_argument("--no-auto-domain", action="store_true",
                         help="Disable automatic domain detection")
     args = parser.parse_args()
 
-    with open(CONFIG_PATH) as f:
-        cfg = yaml.safe_load(f)
+    kb_root = resolve_kb_root(args)
+    cfg = load_config(kb_root)
 
     client = QdrantClient(host=cfg["qdrant"]["host"], port=cfg["qdrant"]["port"])
     embed_model = cfg["embedding"]["model"]
@@ -212,7 +185,7 @@ Examples:
     elif args.no_auto_domain:
         domain = None
     else:
-        domain = detect_domain(args.query)
+        domain = detect_domain(kb_root, args.query)
 
     # Resolve collections
     if args.facts_only:

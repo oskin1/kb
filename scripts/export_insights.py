@@ -3,39 +3,28 @@
 Export insights collection to a markdown file for review.
 
 Usage:
-    python scripts/export_insights.py [options]
-
-Options:
-    --project       Filter by project
-    --domain        Filter by domain
-    --output        Output file (default: kb/insights_export.md)
-    --limit         Max insights to export (default: 200)
+    python scripts/export_insights.py --kb-root /path/to/kb [options]
 """
 
 import argparse
 from pathlib import Path
 from datetime import date
-import yaml
 
-CONFIG_PATH = Path(__file__).parent.parent / "config" / "config.yaml"
-
-
-def load_config():
-    with open(CONFIG_PATH) as f:
-        return yaml.safe_load(f)
+from kb_root import add_kb_root_arg, resolve_kb_root, load_config
 
 
 def main():
     parser = argparse.ArgumentParser(description="Export insights to markdown")
+    add_kb_root_arg(parser)
     parser.add_argument("--project", help="Filter by project")
     parser.add_argument("--domain", help="Filter by domain")
     parser.add_argument("--output", help="Output markdown file")
     parser.add_argument("--limit", type=int, default=200)
     args = parser.parse_args()
 
-    cfg = load_config()
-    output = Path(args.output) if args.output else \
-        Path(__file__).parent.parent / "insights_export.md"
+    kb_root = resolve_kb_root(args)
+    cfg = load_config(kb_root)
+    output = Path(args.output) if args.output else kb_root / "insights_export.md"
 
     from qdrant_client import QdrantClient
     from qdrant_client.models import Filter, FieldCondition, MatchValue
