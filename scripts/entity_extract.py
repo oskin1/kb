@@ -136,6 +136,29 @@ class LLMClient:
             )
             return resp.choices[0].message.content.strip()
 
+    def call_with_system(self, system: str, prompt: str) -> str:
+        """LLM call with a custom system prompt (for use outside entity extraction)."""
+        if self.provider == "anthropic":
+            resp = self._client.messages.create(
+                model=self.model,
+                max_tokens=self.max_tokens,
+                temperature=self.temperature,
+                system=system,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return resp.content[0].text.strip()
+        else:
+            resp = self._client.chat.completions.create(
+                model=self.model,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": prompt},
+                ],
+            )
+            return resp.choices[0].message.content.strip()
+
 
 def get_llm_client(cfg: dict) -> LLMClient:
     return LLMClient(cfg)

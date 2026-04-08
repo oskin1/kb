@@ -25,3 +25,7 @@ openai>=1.0
 pyyaml>=6.0
 requests>=2.31
 python-dotenv>=1.0
+
+# Graph clustering & visualization
+networkx>=3.2
+graspologic>=3.4

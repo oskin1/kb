@@ -47,6 +47,7 @@ ENTITY_FIELDS = {
     "domain":      PayloadSchemaType.KEYWORD,
     "tags":        PayloadSchemaType.KEYWORD,
     "_added":      PayloadSchemaType.KEYWORD,
+    "community_id": PayloadSchemaType.INTEGER,   # graph clustering (Phase 5)
 }
 
 

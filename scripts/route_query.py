@@ -20,7 +20,7 @@ from pathlib import Path
 
 import ollama as ollama_client
 from qdrant_client import QdrantClient
-from qdrant_client.models import Filter, FieldCondition, MatchValue
+from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchAny
 
 from kb_root import add_kb_root_arg, resolve_kb_root, load_config, kb_root_from_cfg
 from domain_config import detect_domain
@@ -98,6 +98,91 @@ def search_facts(client: QdrantClient, vector: list[float],
     return out
 
 
+# ── Community-aware expansion ─────────────────────────────────────────────────
+
+def expand_by_community(client: QdrantClient, entities_col: str, facts_col: str,
+                        vector: list[float], domain: str | None,
+                        expansion_top: int = 3) -> list[dict]:
+    """Find entities matching the query, then surface facts from their
+    community peers — returns results not reachable by direct similarity."""
+    # Step 1: find entities closest to the query
+    try:
+        entity_hits = client.query_points(
+            collection_name=entities_col,
+            query=vector,
+            limit=3,
+            with_payload=True,
+            score_threshold=0.5,
+        ).points
+    except Exception:
+        return []
+
+    if not entity_hits:
+        return []
+
+    # Step 2: collect community_ids from matched entities
+    community_ids = set()
+    matched_entity_ids = set()
+    for e in entity_hits:
+        cid = e.payload.get("community_id")
+        if cid is not None:
+            community_ids.add(cid)
+            matched_entity_ids.add(e.payload.get("entity_id"))
+
+    if not community_ids:
+        return []
+
+    # Step 3: get peer entity_ids in those communities
+    peer_entity_ids = []
+    for cid in community_ids:
+        try:
+            peers, _ = client.scroll(
+                collection_name=entities_col,
+                scroll_filter=Filter(must=[
+                    FieldCondition(key="community_id",
+                                   match=MatchValue(value=cid))
+                ]),
+                limit=50,
+                with_payload=True,
+                with_vectors=False,
+            )
+            for p in peers:
+                eid = p.payload.get("entity_id")
+                if eid and eid not in matched_entity_ids:
+                    peer_entity_ids.append(eid)
+        except Exception:
+            continue
+
+    if not peer_entity_ids:
+        return []
+
+    # Step 4: search facts involving peer entities
+    expanded = []
+    for field in ["subject_entity_id", "object_entity_id"]:
+        try:
+            results = client.query_points(
+                collection_name=facts_col,
+                query=vector,
+                query_filter=Filter(must=[
+                    FieldCondition(key=field,
+                                   match=MatchAny(any=peer_entity_ids[:50]))
+                ]),
+                limit=expansion_top,
+                with_payload=True,
+            ).points
+            for r in results:
+                expanded.append({
+                    "score": r.score * 0.9,
+                    "collection": "facts",
+                    "payload": r.payload,
+                    "_source": "community_expansion",
+                })
+        except Exception:
+            continue
+
+    return expanded
+
+
 # ── Rendering ─────────────────────────────────────────────────────────────────
 
 COLLECTION_LABELS = {
@@ -112,7 +197,11 @@ def render_result(i: int, result: dict):
     score = result["score"]
     label = COLLECTION_LABELS.get(col, col.upper())
 
-    print(f"[{i}] {label}  score={score:.4f}")
+    source_tag = ""
+    if result.get("_source") == "community_expansion":
+        source_tag = "  ↳ via community"
+
+    print(f"[{i}] {label}  score={score:.4f}{source_tag}")
 
     if col == "facts":
         superseded = "  ⚠ SUPERSEDED" if p.get("superseded_by") else ""
@@ -171,6 +260,8 @@ def main():
                         help="Filter facts by relation type (e.g. CONTAINS, USED_IN)")
     parser.add_argument("--no-auto-domain", action="store_true",
                         help="Disable automatic domain detection")
+    parser.add_argument("--no-expand", action="store_true",
+                        help="Disable community-aware query expansion")
     args = parser.parse_args()
 
     kb_root = resolve_kb_root(args)
@@ -222,6 +313,21 @@ def main():
 
         for future in as_completed(futures):
             all_results.extend(future.result())
+
+    # Community-aware expansion
+    if not args.no_expand:
+        entities_col = cfg.get("collections_extra", {}).get("entities", "entities")
+        facts_col = cfg.get("collections_extra", {}).get("facts", "facts")
+        expanded = expand_by_community(client, entities_col, facts_col,
+                                       vector, domain)
+        if expanded:
+            existing_fids = {r["payload"].get("fact_id")
+                             for r in all_results if r["collection"] == "facts"}
+            for ex in expanded:
+                fid = ex["payload"].get("fact_id")
+                if fid and fid not in existing_fids:
+                    all_results.append(ex)
+                    existing_fids.add(fid)
 
     if not all_results:
         print("No results found.")

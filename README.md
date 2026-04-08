@@ -10,6 +10,8 @@ A local RAG pipeline that combines **vector semantic search**, **BM25 keyword se
 - **Contradiction detection** — automatically invalidates stale facts when newer ones arrive
 - **Domain-configurable** — define your own entity types, relationship ontology, and routing keywords in YAML
 - **Multilingual** — bge-m3 embeddings support 100+ languages natively
+- **Graph clustering** — Leiden community detection groups related entities; community-aware query expansion surfaces structurally related facts
+- **Interactive visualization** — vis.js knowledge graph with search, click-to-inspect, and community toggling
 - **Local-first** — Qdrant (Docker) + Ollama embeddings, no data leaves your machine
 - **Multiple ingest sources** — files, URLs, arXiv papers, Telegram
 - **Separate KB directory** — scripts live in this repo, your data lives wherever you choose
@@ -130,6 +132,8 @@ kb-rag/                          # This repo (scripts + defaults)
 │   ├── write_proposal.py        # Actionable recommendations
 │   ├── write_project.py         # Named research threads
 │   ├── export_insights.py       # Export insights to markdown
+│   ├── cluster.py               # Leiden graph clustering + community summaries
+│   ├── visualize.py             # Interactive HTML knowledge graph (vis.js)
 │   ├── fetch_url.py             # Download web pages for ingestion
 │   ├── tg_ingest.py             # Telegram integration handler
 │   └── arxiv_search.py          # arXiv paper search + ingest
@@ -149,6 +153,7 @@ kb-rag/                          # This repo (scripts + defaults)
 ├── notes/                       # Research notes output
 ├── proposals/                   # Proposal documents output
 ├── projects/                    # Project tracking files
+├── exports/                     # Generated artifacts (graph.html, etc.)
 └── .env                         # API keys
 ```
 
@@ -201,6 +206,8 @@ entity_types:
 ## Pipeline Architecture
 
 ```
+                         INGESTION
+                         ─────────
 Document → ingest.py → chunk + embed → Qdrant (research_docs)
                 ↓
         entity_extract.py → LLM extracts entities → Qdrant (entities)
@@ -209,9 +216,33 @@ Document → ingest.py → chunk + embed → Qdrant (research_docs)
                 ↓
         invalidate.py → detect contradictions → mark stale facts
 
+
+                    GRAPH CLUSTERING
+                    ────────────────
+        cluster.py → build NetworkX graph from entities + facts
+                ↓
+        Leiden community detection → assign community_id to entities
+                ↓
+        ├── write community_id back to Qdrant (entities)
+        └── generate community summaries → Qdrant (insights)
+
+
+                      VISUALIZATION
+                      ─────────────
+        visualize.py → fetch entities + facts + community assignments
+                ↓
+        generate interactive HTML → exports/graph.html
+        (vis.js: search, click-to-inspect, community toggling)
+
+
+                          QUERY
+                          ─────
 Query → route_query.py → auto-detect domain
             ↓
         parallel search: research_docs + insights + facts
+            ↓
+        community expansion: match entities → find community peers
+                             → surface related facts (0.9x score)
             ↓
         hybrid (cosine + BM25) → RRF merge → cross-encoder re-rank
             ↓
@@ -233,10 +264,55 @@ All commands require `--kb-root <path>`.
 | `entity_extract.py --all --kb-root <path>` | Extract entities from all unprocessed docs |
 | `fact_extract.py --all --kb-root <path>` | Extract facts from all docs with entities |
 | `invalidate.py --audit --kb-root <path>` | Scan all facts for contradictions |
+| `cluster.py --kb-root <path>` | Leiden clustering + community summaries |
+| `visualize.py --kb-root <path>` | Generate interactive HTML knowledge graph |
 | `add_insight.py "text" --kb-root <path>` | Store a single insight |
 | `write_note.py file.md --kb-root <path>` | Save + index a research note |
 | `fetch_url.py <url> --kb-root <path>` | Download web page for ingestion |
 | `arxiv_search.py "query" --kb-root <path>` | Search arXiv, optionally ingest papers |
+
+## Graph Clustering & Visualization
+
+After entity and fact extraction, run clustering to discover structural communities in your knowledge graph:
+
+```bash
+# Run Leiden community detection — assigns community_id to each entity
+python scripts/cluster.py --kb-root ~/my-kb --verbose
+
+# Generate interactive HTML graph
+python scripts/visualize.py --kb-root ~/my-kb
+# Open ~/my-kb/exports/graph.html in a browser
+```
+
+**What clustering does:**
+
+1. Builds a NetworkX graph from entities (nodes) and facts (edges) stored in Qdrant
+2. Runs the Leiden algorithm to detect communities of related entities
+3. Writes `community_id` back to each entity's payload in Qdrant
+4. Generates LLM summaries per community, stored as searchable insights
+
+**How it amplifies search:**
+
+Once entities have `community_id`, `route_query.py` automatically expands queries via community peers. When your query matches entity A, the system finds other entities in A's community and surfaces their facts too — catching structurally related information that vector similarity alone would miss. Expansion results appear with a `↳ via community` label and a slight score discount so they rank below direct matches.
+
+```bash
+# Community expansion is on by default
+python scripts/route_query.py "carbon nanotubes" --kb-root ~/my-kb
+
+# Disable expansion
+python scripts/route_query.py "carbon nanotubes" --kb-root ~/my-kb --no-expand
+```
+
+**Visualization features:**
+
+The HTML graph uses vis.js with ForceAtlas2 physics layout:
+- Nodes colored by community, sized by connection count
+- Solid edges for established facts, dashed for probable/speculative
+- Search box to find entities by name
+- Click any node to inspect its type, summary, community, and neighbors
+- Toggle communities on/off via the legend
+
+Clustering config lives in `config.yaml` under `clustering:` (resolution, max community size, summary generation) and `visualization:` (max nodes, output directory).
 
 ## Temporal Features
 

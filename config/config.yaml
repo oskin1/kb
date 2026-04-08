@@ -43,3 +43,14 @@ reranker:
   model: BAAI/bge-reranker-v2-m3  # cross-encoder, multilingual
   candidate_multiplier: 3
   max_chunk_chars: 512
+
+clustering:
+  resolution: 1.0            # Leiden resolution (higher = more smaller communities)
+  max_community_size: 10      # re-split communities larger than this
+  max_community_pct: 0.25     # re-split communities larger than this % of graph
+  generate_summaries: true    # LLM-generate a summary per community → insights collection
+  summary_max_entities: 20    # max entities to include in the summary LLM prompt
+
+visualization:
+  max_nodes: 5000
+  output_dir: exports         # relative to kb_root
